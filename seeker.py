@@ -34,6 +34,11 @@ def resize_image(img, size):
     scale = size / w, size / h
     return resized, scale
 
+def rescale_image(img, scale):
+    h, w = img.shape[:2]
+    rescaled= cv2.resize(img, (int(w*scale), int(h*scale)), interpolation=cv2.INTER_NEAREST)
+    return rescaled
+
 def to_cartesian(img, coord):
     h, w = img.shape[:2]
     return (int(coord[0] - w // 2), int(h // 2 - coord[1]))
@@ -149,11 +154,24 @@ def filter_contours(img, min_pixels=1, max_pixels=2000):
     contours, _ = cv2.findContours(img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     return [c for c in contours if min_pixels <= cv2.contourArea(c) <= max_pixels]
 
-def draw_bounding_boxes(img, contours, scale, color=(0, 255, 0), thickness=2):
+def draw_bounding_boxes(img, contours, scale, color=(0, 255, 0), thickness=2,search_center = None,search_size = None):
+    
     for c in contours:
         x, y, w, h = cv2.boundingRect(c)
-        x, y, w, h = int(x/scale), int(y/scale), int(w/scale), int(h/scale)
+        x, y, w, h = int(x/float(scale)), int(y/float(scale)), int(w/float(scale)), int(h/float(scale))
+        #if search_center and search_size:
+        image_search_center = to_image(img,search_center)
+        x = x + (image_search_center[0]-search_size//2)
+        y = y + (image_search_center[1]-search_size//2)
         cv2.rectangle(img, (x, y), (x+w, y+h), color, thickness)
+
+def draw_search_area(img,search_center,search_size,color = (0,0,255),thickness = 2):
+    image_search_center = to_image(img,search_center)
+    x = image_search_center[0]-search_size//2
+    y = image_search_center[1]-search_size//2
+    w = search_size
+    h = search_size
+    cv2.rectangle(img, (x, y), (x+w, y+h), color, thickness)
 
 def draw_contours(img, contours, color=(0, 255, 0), thickness=2):
     cv2.drawContours(img, contours, -1, color, thickness)
@@ -273,6 +291,7 @@ while success:
     #TODO process image
     
     cropped,new_location = crop_square(image,to_image(image,search_location),search_size)
+    search_location = to_cartesian(image,new_location)
     cropped_grey = to_greyscale(cropped)
     resized_grey,rel_scale = resize_image(cropped_grey,smaller_size)
     processed_grey = edge_canny(resized_grey)
@@ -283,11 +302,12 @@ while success:
     contours = find_filter_closed_contours_2(processed_grey)
     draw_contours(processed,contours)
     scaled_up_processed,rel_scale_l = resize_image(processed,400)
-    draw_bounding_boxes(cropped,contours,rel_scale[0])
+    
     frame_track_data = contours_to_trackData(contours)
     frame_track_data = scale_move_to_global_image(image,rel_scale[0],search_location,search_size,frame_track_data)
-    
-
+    oldSearchSize = search_size
+    oldSearchLocation = search_location
+    found = False
     if len(video_track_data)>0:
         video_track_data,velocity,found = track_contour(frame_track_data,video_track_data,5,not_found_count)
         if not found:
@@ -307,15 +327,22 @@ while success:
             image_search_loc = (image_search_loc_x,image_search_loc_y)
             search_location = to_cartesian(image,image_search_loc)
             areas = np.array([p.area for p in video_track_data])
-            search_size = max(int(np.mean(areas)*5),200)
+            search_size = min(max(int(np.mean(areas)*5),200),image.shape[:2][0])
     else:
         for data in frame_track_data:
             if point_distance(to_cartesian(image,(data.cx,data.cy)),(0,0)) < 150:
                 video_track_data.append(data)
                 break
+    if found:
+        draw_bounding_boxes(image,contours,rel_scale[0],color=(0,255,0),search_center=oldSearchLocation,search_size = oldSearchSize)
+    else:
+        draw_bounding_boxes(image,contours,rel_scale[0],color =(255,0,0),search_center=oldSearchLocation,search_size = oldSearchSize)
+    draw_search_area(image,oldSearchLocation, oldSearchSize)
     cropped,rel_scale_l = resize_image(cropped,400)
-    show_input(cropped)
-    show_processed(scaled_up_processed)
+    image = rescale_image(image,0.5)
+    show_input(image)
+    #show_input(cropped)
+    #show_processed(scaled_up_processed)
     success, image = vidcap.read()
     count += 1
     g_time = count*0.033
