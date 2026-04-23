@@ -219,7 +219,7 @@ def track_contour(contours: list, past_data: list, max_data_length=5,missed_trac
 
     # larger margin when little data
     margin_scale = max(1.0, 3.0 / n)
-    margin_scale = margin_scale + (0.5*missed_tracks)
+    margin_scale = margin_scale + (0.1*missed_tracks)
     pos_margin = 70 * margin_scale
     area_margin = 2 * margin_scale  # fraction of expected area
 
@@ -283,6 +283,7 @@ search_location = (0,0)
 smaller_size = 256
 video_track_data = []
 not_found_count = 0
+slow_down = False
 if success:
     print(f"Video Opened: {video_name}")
 else:
@@ -312,7 +313,7 @@ while success:
         video_track_data,velocity,found = track_contour(frame_track_data,video_track_data,5,not_found_count)
         if not found:
             not_found_count += 1
-            if not_found_count > 30:
+            if not_found_count > 5:
                 not_found_count = 0
                 video_track_data = []
                 search_location = (0,0)
@@ -346,8 +347,11 @@ while success:
     success, image = vidcap.read()
     count += 1
     g_time = count*0.033
-    if count >1159:
+    if count >1359:
+        slow_down = True
         count = count
     if count > 1800:
         break
     time.sleep(0.022)
+    #if slow_down:
+    #    time.sleep(0.1)
