@@ -5,6 +5,8 @@ import cv2
 import numpy as np
 import time
 import math
+import picamera2
+from picamera2.request import _MappedBuffer
 g_time = 0
 
 def show_input(img):
@@ -25,7 +27,7 @@ def crop_square(img, center, size):
     return img[y - half:y + half, x - half:x + half], (x, y)
 
 def to_greyscale(img):
-    return cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    return cv2.cvtColor(img, cv2.COLOR_YUV2GRAY_YUY2)
 
 
 def resize_image(img, size):
@@ -270,20 +272,67 @@ def scale_move_to_global_image(img,scale,center,size,trackData):
 def point_distance(p1, p2):
     return np.hypot(p2[0] - p1[0], p2[1] - p1[1])
 
-video_name = 'short_video.mp4'
 
-vidcap = cv2.VideoCapture(video_name)
-success, image = vidcap.read()
+def fast_array(picam2):
+        '''picamera2.capture_array() internal process rewritten to minimise copies and avoid steps not required in this application'''
+        request = picam2.capture_request()
+        streamName = "main"
+        stream = request.stream_map[streamName]
+        fb = request.request.buffers[stream]
+        fd = fb.planes[0].fd
+        cfg = stream.configuration ## see V4LEncoder _encode
+        h = cfg.size.height
+        w = cfg.size.width
+        stride = cfg.stride
+        fmt = str(cfg.pixel_format)
+
+        b = _MappedBuffer(request, streamName).__enter__()
+        arr = np.array(b, copy=False, dtype=np.uint8)
+
+        if fmt in ("YUV420", "YVU420"):
+            # Returning YUV420 as an image of 50% greater height (the extra bit continaing
+            # the U/V data) is useful because OpenCV can convert it to RGB for us quite
+            # efficiently. We leave any packing in there, however, as it would be easier
+            # to remove that after conversion to RGB (if that's what the caller does).
+            image = arr.reshape((h * 3 // 2, stride))
+        else:
+            del arr
+            print(f"Unsupported format: {str(cfg.pixel_format)}")
+            return
+        del arr
+        request.release()
+        return image
+
+
+#video_name = 'short_video.mp4'
+#
+#vidcap = cv2.VideoCapture(video_name)
+#success, image = vidcap.read()
+
+picam = picamera2.Picamera2()
+config = picam.create_video_configuration(
+    {"size": (1280, 960),"format": "YUV420"},  # Main stream size
+    #lores={"size": (1280, 960),"format": "YUV420"},  # Low-res stream for fast access
+    controls={"FrameRate": 43}
+)
+picam.configure(config)
+picam.options["compress_level"] = 0
+picam.start()
+video_name = 'Pi Camera'
+image = fast_array(picam)
+success = True
 count = 0
 
 entity_detected = False
 entity_location = (0,0)
-search_size = 400
+search_size = 300
 search_location = (0,0)
-smaller_size = 256
+smaller_size = 128
 video_track_data = []
 not_found_count = 0
 slow_down = False
+velocity = (0,0)
+start_time = time.time()*1000
 if success:
     print(f"Video Opened: {video_name}")
 else:
@@ -293,16 +342,18 @@ while success:
     
     cropped,new_location = crop_square(image,to_image(image,search_location),search_size)
     search_location = to_cartesian(image,new_location)
-    cropped_grey = to_greyscale(cropped)
+    height, width = config["main"]["size"]
+    cropped_grey = cropped[:height, :width]
+    #cropped_grey = to_greyscale(cropped)
     resized_grey,rel_scale = resize_image(cropped_grey,smaller_size)
     processed_grey = edge_canny(resized_grey)
     #processed_grey = normalize_polarity(processed_grey)
     
-    processed = to_color(processed_grey)
+    #processed = to_color(processed_grey)
     
     contours = find_filter_closed_contours_2(processed_grey)
-    draw_contours(processed,contours)
-    scaled_up_processed,rel_scale_l = resize_image(processed,400)
+    #draw_contours(processed,contours)
+    #scaled_up_processed,rel_scale_l = resize_image(processed,400)
     
     frame_track_data = contours_to_trackData(contours)
     frame_track_data = scale_move_to_global_image(image,rel_scale[0],search_location,search_size,frame_track_data)
@@ -317,7 +368,7 @@ while success:
                 not_found_count = 0
                 video_track_data = []
                 search_location = (0,0)
-                search_size = 400
+                search_size = 300
                 velocity = (0,0)
         else:
             not_found_count = 0
@@ -331,20 +382,21 @@ while success:
             search_size = min(max(int(np.mean(areas)*5),200),image.shape[:2][0])
     else:
         for data in frame_track_data:
-            if point_distance(to_cartesian(image,(data.cx,data.cy)),(0,0)) < 150:
+            if point_distance(to_cartesian(image,(data.cx,data.cy)),(0,0)) < 100:
                 video_track_data.append(data)
                 break
-    if found:
-        draw_bounding_boxes(image,contours,rel_scale[0],color=(0,255,0),search_center=oldSearchLocation,search_size = oldSearchSize)
-    else:
-        draw_bounding_boxes(image,contours,rel_scale[0],color =(255,0,0),search_center=oldSearchLocation,search_size = oldSearchSize)
-    draw_search_area(image,oldSearchLocation, oldSearchSize)
-    cropped,rel_scale_l = resize_image(cropped,400)
-    image = rescale_image(image,0.5)
-    show_input(image)
+    #if found:
+    #    draw_bounding_boxes(image,contours,rel_scale[0],color=(0,255,0),search_center=oldSearchLocation,search_size = oldSearchSize)
+    #else:
+    #    draw_bounding_boxes(image,contours,rel_scale[0],color =(255,0,0),search_center=oldSearchLocation,search_size = oldSearchSize)
+    #draw_search_area(image,oldSearchLocation, oldSearchSize)
+    #cropped,rel_scale_l = resize_image(cropped,400)
+    #image = rescale_image(image,0.5)
+        #show_input(image)
     #show_input(cropped)
     #show_processed(scaled_up_processed)
-    success, image = vidcap.read()
+    #success, image = vidcap.read()
+    image = fast_array(picam)
     count += 1
     g_time = count*0.033
     if count >1359:
@@ -352,6 +404,11 @@ while success:
         count = count
     if count > 1800:
         break
-    time.sleep(0.022)
+    #if count%30 == 0: 
+    end_time = time.time()*1000
+    print(f"\rLocation: {search_location} Velocity: {velocity} Frame Time: {(end_time-start_time)/count}ms",end = "")
+    #start_time = time.time()*1000
+    #time.sleep(0.022)
     #if slow_down:
     #    time.sleep(0.1)
+picam.stop()
