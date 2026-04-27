@@ -6,7 +6,7 @@ import numpy as np
 import time
 import math
 import picamera2
-from picamera2.request import _MappedBuffer
+
 g_time = 0
 
 def show_input(img):
@@ -27,8 +27,11 @@ def crop_square(img, center, size):
     return img[y - half:y + half, x - half:x + half], (x, y)
 
 def to_greyscale(img):
-    return cv2.cvtColor(img, cv2.COLOR_YUV2GRAY_YUY2)
+    return cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
+def yuv_to_greyscale(img):
+    h, w = img.shape[:2]
+    return img[:h, :w]
 
 def resize_image(img, size):
     h, w = img.shape[:2]
@@ -49,94 +52,15 @@ def to_image(img, coord):
     h, w = img.shape[:2]
     return (coord[0] + w // 2, h // 2 - coord[1])
 
-def dog_detect(img, fg_blur, bg_blur, homogeneity_threshold=3.0):
-    if cv2.Laplacian(img, cv2.CV_64F).std() < homogeneity_threshold:
-        return np.zeros(img.shape[:2], dtype=np.uint8)
-    if fg_blur > 0:
-        fg = cv2.GaussianBlur(img, (fg_blur, fg_blur), 0)
-    else:
-        fg = img
-    bg = cv2.GaussianBlur(img, (bg_blur, bg_blur), 0)
-    dog = cv2.absdiff(fg, bg)
-    _, binary = cv2.threshold(dog, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    return binary
-
-def dog_detect_old(img, fg_blur, bg_blur, scale=2.0):
-
-    if fg_blur > 0:
-        fg = cv2.GaussianBlur(img, (0, 0), fg_blur)
-    else:
-        fg = img
-    bg = cv2.GaussianBlur(img, (0, 0), bg_blur)
-    diff = cv2.absdiff(fg, bg)
-    #normed = cv2.normalize(diff,None,0,255,cv2.NORM_MINMAX)
-    mult = cv2.multiply(diff,img/(255.0/scale),dtype=cv2.CV_8U)
-    _, suppress = cv2.threshold(mult, 10, 255, cv2.THRESH_TOZERO)
-    _, edges = cv2.threshold(suppress, 0, 255, cv2.THRESH_TOZERO + cv2.THRESH_OTSU)
-    
-    return edges
-
-def edgedetect(img, fg_blur, bg_blur, scale=2.0):
-
-    if fg_blur > 0:
-        fg = cv2.GaussianBlur(img, (0, 0), fg_blur)
-    else:
-        fg = img
-    bg = cv2.GaussianBlur(img, (0, 0), bg_blur)
-    diff = cv2.absdiff(fg, bg)
-    #normed = cv2.normalize(diff,None,0,255,cv2.NORM_MINMAX)
-    mult = cv2.multiply(diff,img/(255.0/scale),dtype=cv2.CV_8U)
-    _, suppress = cv2.threshold(mult, 10, 255, cv2.THRESH_TOZERO)
-    _, edges = cv2.threshold(suppress, 0, 255, cv2.THRESH_TOZERO + cv2.THRESH_OTSU)
-    
-    return edges
-
-def auto_canny(image, sigma=0.05):
-    # Compute median of single channel pixel intensities
-    v = np.mean(image)
-    
-    # Apply automatic Canny edge detection using the computed median
-    lower = int(max(0, (1.0 - sigma) * v))
-    upper = int(min(255, (1.0 + sigma) * v))
-    
-    return cv2.Canny(image, lower, upper)
-
-def auto_edge_canny(img):
-    blur = cv2.GaussianBlur(img, (0, 0), 3)
-    return auto_canny(blur)
 
 def edge_canny(img, low=50, high=200):
-    #blur = cv2.GaussianBlur(img, (0, 0), 1)
     return cv2.Canny(img, low, high)
 
 def to_color(img):
     return cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
 
 
-def normalize_polarity(img, tolerance=0.0):
-    count = cv2.countNonZero(img)
-    ratio = count / img.size
-    if abs(ratio - 0.5) < tolerance:
-        return np.zeros_like(img)
-    if ratio > 0.5:
-        return cv2.bitwise_not(img)
-    return img
-
-def find_filter_closed_contours(edge_img,kernel_size = 5,min_solidity = 0.4):
-    #kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size,kernel_size))
-    #closed = cv2.morphologyEx(edge_img, cv2.MORPH_CLOSE, kernel)
-    contours, _ = cv2.findContours(edge_img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    good_contours = []
-    for c in contours:
-        area = cv2.contourArea(c)
-        hull_area = cv2.contourArea(cv2.convexHull(c))
-        #perimeter = cv2.arcLength(c,True)
-        if hull_area > 0 and area / hull_area >= min_solidity:
-        #if perimeter>0 and area/perimeter >= min_solidity:
-            good_contours.append(c)
-    return good_contours
-
-def find_filter_closed_contours_2(edge_img,kernel_size = 7,min_solidity = 1):
+def find_filter_closed_contours(edge_img,kernel_size = 7,min_solidity = 1):
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size,kernel_size))
     closed = cv2.morphologyEx(edge_img, cv2.MORPH_CLOSE, kernel)
     contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -151,10 +75,6 @@ def find_filter_closed_contours_2(edge_img,kernel_size = 7,min_solidity = 1):
         if perimeter>0 and area/perimeter >= min_solidity and cw/iw < 0.8 and ch/ih < 0.8:#*area/100:
             good_contours.append(c)
     return good_contours
-
-def filter_contours(img, min_pixels=1, max_pixels=2000):
-    contours, _ = cv2.findContours(img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    return [c for c in contours if min_pixels <= cv2.contourArea(c) <= max_pixels]
 
 def draw_bounding_boxes(img, contours, scale, color=(0, 255, 0), thickness=2,search_center = None,search_size = None):
     
@@ -181,7 +101,7 @@ def draw_contours(img, contours, color=(0, 255, 0), thickness=2):
 class trackDataPoint:
     def __init__(self, center,area):
         self.area = area
-        self.timestamp = g_time * 1000
+        self.timestamp = time.time() * 1000
         self.cx, self.cy = center[0],center[1]
 
 def get_contour_center(contour):
@@ -210,7 +130,7 @@ def track_contour(contours: list, past_data: list, max_data_length=5,missed_trac
         vy = np.polyfit(t, ys, 1)[0]
         velocity = (vx, vy)
 
-        dt = g_time * 1000 - past_data[-1].timestamp
+        dt = time.time() * 1000 - past_data[-1].timestamp
         exp_x = past_data[-1].cx + vx * dt
         exp_y = past_data[-1].cy + vy * dt
         exp_area = np.mean(areas)
@@ -273,45 +193,15 @@ def point_distance(p1, p2):
     return np.hypot(p2[0] - p1[0], p2[1] - p1[1])
 
 
-def fast_array(picam2):
-        '''picamera2.capture_array() internal process rewritten to minimise copies and avoid steps not required in this application'''
-        request = picam2.capture_request()
-        streamName = "main"
-        stream = request.stream_map[streamName]
-        fb = request.request.buffers[stream]
-        fd = fb.planes[0].fd
-        cfg = stream.configuration ## see V4LEncoder _encode
-        h = cfg.size.height
-        w = cfg.size.width
-        stride = cfg.stride
-        fmt = str(cfg.pixel_format)
-
-        b = _MappedBuffer(request, streamName).__enter__()
-        arr = np.array(b, copy=False, dtype=np.uint8)
-
-        if fmt in ("YUV420", "YVU420"):
-            # Returning YUV420 as an image of 50% greater height (the extra bit continaing
-            # the U/V data) is useful because OpenCV can convert it to RGB for us quite
-            # efficiently. We leave any packing in there, however, as it would be easier
-            # to remove that after conversion to RGB (if that's what the caller does).
-            image = arr.reshape((h * 3 // 2, stride))
-        else:
-            del arr
-            print(f"Unsupported format: {str(cfg.pixel_format)}")
-            return
-        del arr
-        request.release()
-        return image
-
-
 #video_name = 'short_video.mp4'
 #
 #vidcap = cv2.VideoCapture(video_name)
 #success, image = vidcap.read()
 
 picam = picamera2.Picamera2()
+frame_size = (1280,960)
 config = picam.create_video_configuration(
-    {"size": (1280, 960),"format": "YUV420"},  # Main stream size
+    {"size": frame_size,"format": "YUV420"},  # Main stream size
     #lores={"size": (1280, 960),"format": "YUV420"},  # Low-res stream for fast access
     controls={"FrameRate": 43}
 )
@@ -319,13 +209,15 @@ picam.configure(config)
 picam.options["compress_level"] = 0
 picam.start()
 video_name = 'Pi Camera'
-image = fast_array(picam)
+image = picam.capture_array()
+image = image[:frame_size[1],:frame_size[0]]
+#image = cv2.cvtColor(image, cv2.COLOR_YUV2BGR_I420)
 success = True
 count = 0
 
 entity_detected = False
 entity_location = (0,0)
-search_size = 300
+search_size = 400
 search_location = (0,0)
 smaller_size = 128
 video_track_data = []
@@ -340,18 +232,16 @@ else:
 while success:
     #TODO process image
     
-    cropped,new_location = crop_square(image,to_image(image,search_location),search_size)
+    cropped_grey,new_location = crop_square(image,to_image(image,search_location),search_size)
     search_location = to_cartesian(image,new_location)
-    height, width = config["main"]["size"]
-    cropped_grey = cropped[:height, :width]
     #cropped_grey = to_greyscale(cropped)
+    
     resized_grey,rel_scale = resize_image(cropped_grey,smaller_size)
     processed_grey = edge_canny(resized_grey)
-    #processed_grey = normalize_polarity(processed_grey)
     
     #processed = to_color(processed_grey)
     
-    contours = find_filter_closed_contours_2(processed_grey)
+    contours = find_filter_closed_contours(processed_grey)
     #draw_contours(processed,contours)
     #scaled_up_processed,rel_scale_l = resize_image(processed,400)
     
@@ -368,12 +258,12 @@ while success:
                 not_found_count = 0
                 video_track_data = []
                 search_location = (0,0)
-                search_size = 300
+                search_size = 400
                 velocity = (0,0)
         else:
             not_found_count = 0
         if len(video_track_data)>1:
-            time_now_ms = g_time*1000
+            time_now_ms = time.time()*1000
             image_search_loc_x = video_track_data[-1].cx+velocity[0]*(time_now_ms-video_track_data[-2].timestamp)
             image_search_loc_y = video_track_data[-1].cy+velocity[1]*(time_now_ms-video_track_data[-2].timestamp)
             image_search_loc = (image_search_loc_x,image_search_loc_y)
@@ -382,21 +272,24 @@ while success:
             search_size = min(max(int(np.mean(areas)*5),200),image.shape[:2][0])
     else:
         for data in frame_track_data:
-            if point_distance(to_cartesian(image,(data.cx,data.cy)),(0,0)) < 100:
+            if point_distance(to_cartesian(image,(data.cx,data.cy)),(0,0)) < 150:
                 video_track_data.append(data)
                 break
-    #if found:
-    #    draw_bounding_boxes(image,contours,rel_scale[0],color=(0,255,0),search_center=oldSearchLocation,search_size = oldSearchSize)
-    #else:
-    #    draw_bounding_boxes(image,contours,rel_scale[0],color =(255,0,0),search_center=oldSearchLocation,search_size = oldSearchSize)
-    #draw_search_area(image,oldSearchLocation, oldSearchSize)
+    if found:
+        draw_bounding_boxes(image,contours,rel_scale[0],color=(0,255,0),search_center=oldSearchLocation,search_size = oldSearchSize)
+    else:
+        draw_bounding_boxes(image,contours,rel_scale[0],color =(255,0,0),search_center=oldSearchLocation,search_size = oldSearchSize)
+    draw_search_area(image,oldSearchLocation, oldSearchSize)
     #cropped,rel_scale_l = resize_image(cropped,400)
-    #image = rescale_image(image,0.5)
+    image = rescale_image(image,0.5)
+    #cv2.imwrite(f"frame_{count:04d}.png", image)  # Save frame as PNG
         #show_input(image)
     #show_input(cropped)
     #show_processed(scaled_up_processed)
     #success, image = vidcap.read()
-    image = fast_array(picam)
+    image = picam.capture_array()
+    image = image[:frame_size[1],:frame_size[0]]
+    #image = cv2.cvtColor(image, cv2.COLOR_YUV2BGR_I420)
     count += 1
     g_time = count*0.033
     if count >1359:
