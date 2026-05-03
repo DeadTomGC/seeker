@@ -6,6 +6,7 @@ import numpy as np
 import time
 import math
 import picamera2
+from client import *
 
 g_time = 0
 
@@ -86,7 +87,18 @@ def draw_bounding_boxes(img, contours, scale, color=(0, 255, 0), thickness=2,sea
         x = x + (image_search_center[0]-search_size//2)
         y = y + (image_search_center[1]-search_size//2)
         cv2.rectangle(img, (x, y), (x+w, y+h), color, thickness)
-
+        
+def rescale_bounding_boxes_to_image(img, contours, scale, search_center,search_size):
+    bounding_boxes = []
+    for c in contours:
+        x, y, w, h = cv2.boundingRect(c)
+        x, y, w, h = int(x/float(scale)), int(y/float(scale)), int(w/float(scale)), int(h/float(scale))
+        #if search_center and search_size:
+        image_search_center = to_image(img,search_center)
+        x = x + (image_search_center[0]-search_size//2)
+        y = y + (image_search_center[1]-search_size//2)
+        bounding_boxes.append([x, y, w, h])
+    return bounding_boxes
 def draw_search_area(img,search_center,search_size,color = (0,0,255),thickness = 2):
     image_search_center = to_image(img,search_center)
     x = image_search_center[0]-search_size//2
@@ -199,11 +211,23 @@ def point_distance(p1, p2):
 #success, image = vidcap.read()
 
 picam = picamera2.Picamera2()
-frame_size = (1280,960)
+frame_size = (640,480)
+
+modes = picam.sensor_modes
+
+for mode in modes:
+    #go for largest Y value that can hit 30fps
+    if frame_size[1] <= mode["size"][1] and mode["size"][0] < 1920 and mode["fps"] >= 30:
+        frame_size = mode["size"]
+        frame_rate = mode["fps"]
+        print(f"{frame_size},{frame_rate}")
+        
+print(f"Selected Mode = size:{frame_size},fps:{frame_rate}")
+
 config = picam.create_video_configuration(
     {"size": frame_size,"format": "YUV420"},  # Main stream size
     #lores={"size": (1280, 960),"format": "YUV420"},  # Low-res stream for fast access
-    controls={"FrameRate": 43}
+    controls={"FrameRate": frame_rate}
 )
 picam.configure(config)
 picam.options["compress_level"] = 0
@@ -224,7 +248,15 @@ video_track_data = []
 not_found_count = 0
 slow_down = False
 velocity = (0,0)
+
+client = StatusClient(SERVER_HOST, SERVER_PORT)
+client.set_go_callback(on_go)
+
+time.sleep(1.0)
+
+
 start_time = time.time()*1000
+
 if success:
     print(f"Video Opened: {video_name}")
 else:
@@ -295,11 +327,19 @@ while success:
     if count >1359:
         slow_down = True
         count = count
-    if count > 1800:
+    if count > 10000:
         break
     #if count%30 == 0: 
     end_time = time.time()*1000
-    print(f"\rLocation: {search_location} Velocity: {velocity} Frame Time: {(end_time-start_time)/count}ms",end = "")
+    bounding_boxes = rescale_bounding_boxes_to_image(image,contours,rel_scale[0],oldSearchLocation,oldSearchSize)
+    tiny_grey,_ = resize_image(resized_grey,40)
+    if client.connected:
+        client.sendStatus(bounding_boxes, velocity,
+                            to_image(image,oldSearchLocation), [oldSearchSize,oldSearchSize], frame_size, tiny_grey)
+    print(f"\rConnection: {client.connected}Location: {search_location} Velocity: {velocity} Frame Time: {(end_time-start_time)}ms",end = "")
+    if end_time-start_time > 40:
+        print(f"High Frame Time: {end_time-start_time}ms")
+    start_time = time.time()*1000
     #start_time = time.time()*1000
     #time.sleep(0.022)
     #if slow_down:
