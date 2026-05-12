@@ -1,14 +1,7 @@
-
-
-
 import cv2
 import numpy as np
 import time
 import math
-import picamera2
-from client import *
-
-g_time = 0
 
 def show_input(img):
     cv2.imshow('input', img)
@@ -99,6 +92,7 @@ def rescale_bounding_boxes_to_image(img, contours, scale, search_center,search_s
         y = y + (image_search_center[1]-search_size//2)
         bounding_boxes.append([x, y, w, h])
     return bounding_boxes
+
 def draw_search_area(img,search_center,search_size,color = (0,0,255),thickness = 2):
     image_search_center = to_image(img,search_center)
     x = image_search_center[0]-search_size//2
@@ -111,9 +105,9 @@ def draw_contours(img, contours, color=(0, 255, 0), thickness=2):
     cv2.drawContours(img, contours, -1, color, thickness)
 
 class trackDataPoint:
-    def __init__(self, center,area):
+    def __init__(self, center,area,time_ms):
         self.area = area
-        self.timestamp = time.time() * 1000
+        self.timestamp = time_ms
         self.cx, self.cy = center[0],center[1]
 
 def get_contour_center(contour):
@@ -122,7 +116,7 @@ def get_contour_center(contour):
         return 0, 0
     return M["m10"] / M["m00"], M["m01"] / M["m00"]
 
-def track_contour(contours: list, past_data: list, max_data_length=5,missed_tracks = 0):
+def track_contour(contours: list, past_data: list, max_data_length,missed_tracks,time_ms):
     velocity = (0, 0)
 
     if not past_data:
@@ -142,7 +136,7 @@ def track_contour(contours: list, past_data: list, max_data_length=5,missed_trac
         vy = np.polyfit(t, ys, 1)[0]
         velocity = (vx, vy)
 
-        dt = time.time() * 1000 - past_data[-1].timestamp
+        dt = time_ms - past_data[-1].timestamp
         exp_x = past_data[-1].cx + vx * dt
         exp_y = past_data[-1].cy + vy * dt
         exp_area = np.mean(areas)
@@ -193,155 +187,270 @@ def max_bounding_box_length(contour):
     x, y, w, h = cv2.boundingRect(contour)
     return max(w,h)
 
-def contours_to_trackData(contours):
-    return [trackDataPoint(get_contour_center(c),max_bounding_box_length(c)) for c in contours]
+def contours_to_trackData(contours,time_ms):
+    return [trackDataPoint(get_contour_center(c),max_bounding_box_length(c),time_ms) for c in contours]
 
 def scale_move_to_global_image(img,scale,center,size,trackData):
     frame_center = to_image(img,center)
     crop_top_left = (frame_center[0]-size//2,frame_center[1]-size//2)
-    return [trackDataPoint((p.cx/scale+crop_top_left[0],p.cy/scale+crop_top_left[1]),p.area/scale) for p in trackData]
+    return [trackDataPoint((p.cx/scale+crop_top_left[0],p.cy/scale+crop_top_left[1]),p.area/scale,p.timestamp) for p in trackData]
 
 def point_distance(p1, p2):
     return np.hypot(p2[0] - p1[0], p2[1] - p1[1])
 
 
-#video_name = 'short_video.mp4'
-#
-#vidcap = cv2.VideoCapture(video_name)
-#success, image = vidcap.read()
-
-picam = picamera2.Picamera2()
-frame_size = (640,480)
-
-modes = picam.sensor_modes
-
-for mode in modes:
-    #go for largest Y value that can hit 30fps
-    if frame_size[1] <= mode["size"][1] and mode["size"][0] < 1920 and mode["fps"] >= 30:
-        frame_size = mode["size"]
-        frame_rate = mode["fps"]
-        print(f"{frame_size},{frame_rate}")
-        
-print(f"Selected Mode = size:{frame_size},fps:{frame_rate}")
-
-config = picam.create_video_configuration(
-    {"size": frame_size,"format": "YUV420"},  # Main stream size
-    #lores={"size": (1280, 960),"format": "YUV420"},  # Low-res stream for fast access
-    controls={"FrameRate": frame_rate}
-)
-picam.configure(config)
-picam.options["compress_level"] = 0
-picam.start()
-video_name = 'Pi Camera'
-image = picam.capture_array()
-image = image[:frame_size[1],:frame_size[0]]
-#image = cv2.cvtColor(image, cv2.COLOR_YUV2BGR_I420)
-success = True
-count = 0
-
-entity_detected = False
-entity_location = (0,0)
-search_size = 400
-search_location = (0,0)
-smaller_size = 128
-video_track_data = []
-not_found_count = 0
-slow_down = False
-velocity = (0,0)
-
-client = StatusClient(SERVER_HOST, SERVER_PORT)
-client.set_go_callback(on_go)
-
-time.sleep(1.0)
-
-
-start_time = time.time()*1000
-
-if success:
-    print(f"Video Opened: {video_name}")
-else:
-    print("Error, Exiting")
-while success:
-    #TODO process image
+class Seeker:
+    """
+    Tracks objects in a video stream.
+    Accepts either YUV420 or BGR images.
     
-    cropped_grey,new_location = crop_square(image,to_image(image,search_location),search_size)
-    search_location = to_cartesian(image,new_location)
-    #cropped_grey = to_greyscale(cropped)
-    
-    resized_grey,rel_scale = resize_image(cropped_grey,smaller_size)
-    processed_grey = edge_canny(resized_grey)
-    
-    #processed = to_color(processed_grey)
-    
-    contours = find_filter_closed_contours(processed_grey)
-    #draw_contours(processed,contours)
-    #scaled_up_processed,rel_scale_l = resize_image(processed,400)
-    
-    frame_track_data = contours_to_trackData(contours)
-    frame_track_data = scale_move_to_global_image(image,rel_scale[0],search_location,search_size,frame_track_data)
-    oldSearchSize = search_size
-    oldSearchLocation = search_location
-    found = False
-    if len(video_track_data)>0:
-        video_track_data,velocity,found = track_contour(frame_track_data,video_track_data,5,not_found_count)
-        if not found:
-            not_found_count += 1
-            if not_found_count > 5:
-                not_found_count = 0
-                video_track_data = []
-                search_location = (0,0)
-                search_size = 400
-                velocity = (0,0)
+    Parameters
+    ----------
+    frame_size : tuple
+        (width, height) of the input frames.
+    image_format : str
+        'YUV420' or 'BGR'. Determines how greyscale is extracted from input frames.
+    """
+
+    def __init__(self, frame_size=(640, 480), image_format='YUV420'):
+        self.frame_size = frame_size
+        self.image_format = image_format  # 'YUV420' or 'BGR'
+
+        # --- tracking state (mirrors original script globals) ---
+        self.entity_detected = False
+        self.entity_location = (0, 0)
+        self.search_size = 400
+        self.search_location = (0, 0)
+        self.real_search_size = 400
+        self.real_search_location = (0, 0)
+        self.smaller_size = 256
+        self.search_obj_size_ratio = 5
+        self.track_history_length = 5
+        self.video_track_data = []
+        self.not_found_count = 0
+        self.slow_down = False
+        self.velocity = (0, 0)
+
+        # --- per-frame outputs exposed for callers ---
+        self.bounding_boxes = []        # rescaled bounding boxes in image coords
+        self.contours = []              # raw contours from last processed crop
+        self.rel_scale = (1.0, 1.0)    # scale used in last resize
+        self.found = False              # whether tracking succeeded last frame
+        self.resized_grey = None        # the small greyscale crop (smaller_size x smaller_size)
+        self.processed_grey = None
+        self.tiny_grey = None           # 40x40 version for transmission
+
+        # internal reference image shape (set on first process call)
+        self._img_shape = None
+
+        self.count = 0
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _to_greyscale(self, image):
+        """Convert input image to greyscale according to the configured format."""
+        if self.image_format == 'YUV420':
+            return yuv_to_greyscale(image)
         else:
-            not_found_count = 0
-        if len(video_track_data)>1:
-            time_now_ms = time.time()*1000
-            image_search_loc_x = video_track_data[-1].cx+velocity[0]*(time_now_ms-video_track_data[-2].timestamp)
-            image_search_loc_y = video_track_data[-1].cy+velocity[1]*(time_now_ms-video_track_data[-2].timestamp)
-            image_search_loc = (image_search_loc_x,image_search_loc_y)
-            search_location = to_cartesian(image,image_search_loc)
-            areas = np.array([p.area for p in video_track_data])
-            search_size = min(max(int(np.mean(areas)*5),200),image.shape[:2][0])
-    else:
-        for data in frame_track_data:
-            if point_distance(to_cartesian(image,(data.cx,data.cy)),(0,0)) < 150:
-                video_track_data.append(data)
-                break
-    if found:
-        draw_bounding_boxes(image,contours,rel_scale[0],color=(0,255,0),search_center=oldSearchLocation,search_size = oldSearchSize)
-    else:
-        draw_bounding_boxes(image,contours,rel_scale[0],color =(255,0,0),search_center=oldSearchLocation,search_size = oldSearchSize)
-    draw_search_area(image,oldSearchLocation, oldSearchSize)
-    #cropped,rel_scale_l = resize_image(cropped,400)
-    image = rescale_image(image,0.5)
-    #cv2.imwrite(f"frame_{count:04d}.png", image)  # Save frame as PNG
-        #show_input(image)
-    #show_input(cropped)
-    #show_processed(scaled_up_processed)
-    #success, image = vidcap.read()
-    image = picam.capture_array()
-    image = image[:frame_size[1],:frame_size[0]]
-    #image = cv2.cvtColor(image, cv2.COLOR_YUV2BGR_I420)
-    count += 1
-    g_time = count*0.033
-    if count >1359:
-        slow_down = True
-        count = count
-    if count > 10000:
-        break
-    #if count%30 == 0: 
-    end_time = time.time()*1000
-    bounding_boxes = rescale_bounding_boxes_to_image(image,contours,rel_scale[0],oldSearchLocation,oldSearchSize)
-    tiny_grey,_ = resize_image(resized_grey,40)
-    if client.connected:
-        client.sendStatus(bounding_boxes, velocity,
-                            to_image(image,oldSearchLocation), [oldSearchSize,oldSearchSize], frame_size, tiny_grey)
-    print(f"\rConnection: {client.connected}Location: {search_location} Velocity: {velocity} Frame Time: {(end_time-start_time)}ms",end = "")
-    if end_time-start_time > 40:
-        print(f"High Frame Time: {end_time-start_time}ms")
-    start_time = time.time()*1000
-    #start_time = time.time()*1000
-    #time.sleep(0.022)
-    #if slow_down:
-    #    time.sleep(0.1)
-picam.stop()
+            return to_greyscale(image)
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def process_frame(self, image, time_ms):
+        """
+        Process a single frame and update tracking state.
+
+        Parameters
+        ----------
+        image : np.ndarray
+            Raw camera frame in either YUV420 or BGR format as configured.
+
+        Returns
+        -------
+        found : bool
+            Whether a tracked object was found in this frame.
+        """
+        # Keep a reference shape for coordinate helpers
+        # For YUV420 the luma plane is the top frame_size[1] rows, so we treat
+        # the greyscale image as (h, w) = frame_size.  We build a dummy header
+        # array just to carry the shape into the module-level helpers.
+
+        # Extract greyscale from the raw frame
+        grey_full = self._to_greyscale(image)
+        # grey_full is now a 2-D array of shape (h, w)
+
+        cropped_grey, new_location = crop_square(
+            grey_full,
+            to_image(grey_full, self.search_location),
+            self.search_size
+        )
+        self.search_location = to_cartesian(grey_full, new_location)
+        self.real_search_location = self.search_location
+        self.real_search_size = self.search_size
+        self.resized_grey, self.rel_scale = resize_image(cropped_grey, self.smaller_size)
+ 
+
+        self.processed_grey = edge_canny(self.resized_grey)
+
+        #processed = to_color(processed_grey)
+
+        self.contours = find_filter_closed_contours(self.processed_grey)
+        #draw_contours(processed, self.contours)
+        #scaled_up_processed, rel_scale_l = resize_image(processed, 400)
+
+        frame_track_data = scale_move_to_global_image(
+            grey_full, self.rel_scale[0], self.search_location, self.search_size, contours_to_trackData(self.contours,time_ms)
+        )
+
+        new_found = False
+        if len(self.video_track_data) > 0:
+            self.video_track_data, self.velocity, new_found = track_contour(
+                frame_track_data, self.video_track_data, self.track_history_length, self.not_found_count,time_ms
+            )
+            if not new_found:
+                self.not_found_count += 1
+                if self.not_found_count > 5:
+                    self.not_found_count = 0
+                    self.video_track_data = []
+                    self.search_location = (0, 0)
+                    self.search_size = 400
+                    self.velocity = (0, 0)
+            else:
+                self.not_found_count = 0
+            if len(self.video_track_data) > 1:
+                image_search_loc_x = (
+                    self.video_track_data[-1].cx
+                    + self.velocity[0] * (time_ms - self.video_track_data[-2].timestamp)
+                )
+                image_search_loc_y = (
+                    self.video_track_data[-1].cy
+                    + self.velocity[1] * (time_ms - self.video_track_data[-2].timestamp)
+                )
+                image_search_loc = (image_search_loc_x, image_search_loc_y)
+                self.search_location = to_cartesian(grey_full, image_search_loc)
+                areas = np.array([p.area for p in self.video_track_data])
+                self.search_size = min(
+                    max(int(np.mean(areas) * self.search_obj_size_ratio), 200),
+                    grey_full.shape[:2][0]
+                )
+        else:
+            for data in frame_track_data:
+                if point_distance(to_cartesian(grey_full, (data.cx, data.cy)), (0, 0)) < 150:
+                    self.video_track_data.append(data)
+                    break
+
+        self.found = new_found
+
+        # Compute bounding boxes in image coordinates.
+        # rescale_bounding_boxes_to_image uses img.shape, so pass grey_full.
+        self.bounding_boxes = rescale_bounding_boxes_to_image(
+            grey_full, self.contours, self.rel_scale[0], self.real_search_location, self.real_search_size
+        )
+
+        # Small thumbnail for transmission
+        tiny_grey, _ = resize_image(self.resized_grey, 40)
+        self.tiny_grey = tiny_grey
+
+        self.count += 1
+
+        return new_found
+
+    # ------------------------------------------------------------------
+    # Debug / monitoring image helpers
+    # ------------------------------------------------------------------
+
+    def get_debug_bgr_image(self, image):
+        """
+        Return a BGR debug image with bounding boxes and search area overlaid.
+
+        Parameters
+        ----------
+        image : np.ndarray
+            The same frame that was passed to process_frame (YUV420 or BGR).
+
+        Returns
+        -------
+        debug_img : np.ndarray
+            BGR image at half resolution with annotations drawn on it.
+        """
+        # Convert to BGR for display
+        if self.image_format == 'YUV420':
+            bgr = cv2.cvtColor(image, cv2.COLOR_YUV2BGR_I420)
+        else:
+            bgr = image #no copy
+
+        # Draw bounding boxes
+        if self.found:
+            draw_bounding_boxes(
+                bgr, self.contours, self.rel_scale[0],
+                color=(0, 255, 0),
+                search_center=self.real_search_location,
+                search_size=self.real_search_size
+            )
+        else:
+            draw_bounding_boxes(
+                bgr, self.contours, self.rel_scale[0],
+                color=(255, 0, 0),
+                search_center=self.real_search_location,
+                search_size=self.real_search_size
+            )
+
+        draw_search_area(bgr, self.real_search_location, self.real_search_size)
+
+        # Scale down for display
+        debug_img = rescale_image(bgr, 0.5)
+        return debug_img
+
+    def get_resized_grey_image(self):
+        """
+        Return the small greyscale crop used for edge detection (smaller_size x smaller_size).
+
+        Returns
+        -------
+        np.ndarray or None
+        """
+        return self.resized_grey
+
+    def get_tiny_grey_image(self):
+        """
+        Return the 40x40 greyscale thumbnail used for transmission.
+
+        Returns
+        -------
+        np.ndarray or None
+        """
+        return self.tiny_grey
+
+    def get_edge_image(self):
+        """
+        Return the Canny edge image of the last processed crop.
+
+        Returns
+        -------
+        np.ndarray or None
+        """
+
+        return self.processed_grey
+
+    def get_status(self):
+        """
+        Return a dict summarising the current tracker state.
+
+        Returns
+        -------
+        dict with keys: found, search_location, search_size, velocity,
+                        bounding_boxes, not_found_count, count
+        """
+        return {
+            'found': self.found,
+            'search_location': self.real_search_location,
+            'search_size': self.real_search_size,
+            'velocity': self.velocity,
+            'bounding_boxes': self.bounding_boxes,
+            'not_found_count': self.not_found_count,
+            'count': self.count,
+        }
