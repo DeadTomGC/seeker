@@ -33,6 +33,12 @@ def resize_image(img, size):
     scale = size / w, size / h
     return resized, scale
 
+def slow_resize_image(img, size):
+    h, w = img.shape[:2]
+    resized = cv2.resize(img, (size, size), interpolation=cv2.INTER_LINEAR)
+    scale = size / w, size / h
+    return resized, scale
+
 def rescale_image(img, scale):
     h, w = img.shape[:2]
     rescaled= cv2.resize(img, (int(w*scale), int(h*scale)), interpolation=cv2.INTER_NEAREST)
@@ -292,13 +298,27 @@ class Seeker:
         self.real_search_location = self.search_location
         self.real_search_size = self.search_size
         self.resized_grey, self.rel_scale = resize_image(cropped_grey, self.smaller_size)
- 
-
         self.processed_grey = edge_canny(self.resized_grey)
 
         #processed = to_color(processed_grey)
 
         self.contours = find_filter_closed_contours(self.processed_grey)
+        
+        if len(self.contours) == 0:
+            #failed to find the target, are we in trees?
+            tiny_op_time = time.time()*1000000
+            self.extra_tiny = self.resized_grey #slow_resize_image(self.resized_grey,64)
+            self.extra_tiny = cv2.blur(self.extra_tiny,(5,5))
+            self.processed_extra_tiny = edge_canny(self.extra_tiny,low=100,high=200)
+            
+            tiny_op_time_2 = time.time()*1000000
+            self.tiny_time = tiny_op_time_2 - tiny_op_time
+            
+            self.big_proc_extra_tiny,_ = resize_image(self.processed_extra_tiny, self.smaller_size)
+
+            self.contours = find_filter_closed_contours(self.resized_grey)
+            self.rel_scale = self.rel_scale*1 #incase we resize it
+            
         #draw_contours(processed, self.contours)
         #scaled_up_processed, rel_scale_l = resize_image(processed, 400)
 
@@ -332,11 +352,13 @@ class Seeker:
                 )
                 image_search_loc = (image_search_loc_x, image_search_loc_y)
                 self.search_location = to_cartesian(grey_full, image_search_loc)
+                #self.search_location = (0, 0) #TODO: delete
                 areas = np.array([p.area for p in self.video_track_data])
                 self.search_size = min(
                     max(int(np.mean(areas) * self.search_obj_size_ratio), 200),
                     grey_full.shape[:2][0]
                 )
+                #self.search_size = 400 #TODO: delete
         else:
             for data in frame_track_data:
                 if point_distance(to_cartesian(grey_full, (data.cx, data.cy)), (0, 0)) < 150:

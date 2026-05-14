@@ -1,7 +1,9 @@
+USE_VIDEO_FILE = False
 try:
     import picamera2
 except:
     print("no picam, hope you're good with that... ")
+    USE_VIDEO_FILE = True
 import time
 import sys
 import cv2
@@ -13,21 +15,27 @@ def show_input(img):
     cv2.imshow('input', img)
     cv2.waitKey(1)
 
+def show_debug(img):
+    cv2.imshow('debug', img)
+    cv2.waitKey(1)
 
 g_time = 0
-USE_VIDEO_FILE = False
 
+video_file = ''
 # Check for --video command line argument
 if '--video' in sys.argv:
     USE_VIDEO_FILE = True
     video_idx = sys.argv.index('--video')
     if video_idx + 1 < len(sys.argv):
         video_file = sys.argv[video_idx + 1]
-    else:
-        video_file = 'short_video.mp4'
-    print(f"Using video file: {video_file}")
+
+
+if video_file == '' and USE_VIDEO_FILE:
+    video_file = 'short_video.mp4'
+    
 
 if USE_VIDEO_FILE:
+    print(f"Using video file: {video_file}")
     vidcap = cv2.VideoCapture(video_file)
     success, image = vidcap.read()
     frame_size = (image.shape[1], image.shape[0]) if success else (640, 480)
@@ -105,15 +113,15 @@ while success:
 
     if count % 10 == 0:
         print(f"\rConnection: {'N/A (video file)' if USE_VIDEO_FILE else client.connected} "
-              f"Location: {search_location} Velocity: {velocity} "
-              f"Frame Time: {(end_time - start_time)}ms", end="")
+              f"Location: {search_location} Velocity: {velocity[0]:.2f},{velocity[1]:.2f} "
+              f"Frame Time: {(end_time - start_time):.2f}ms, Tiny Time {tracker.tiny_time:.2f}", end="")
     if end_time - start_time > 40:
-        print(f"High Frame Time: {end_time - start_time}ms")
+        print(f"\nHigh Frame Time: {end_time - start_time}ms")
         
     if USE_VIDEO_FILE:
         debug_frame = tracker.get_debug_bgr_image(image)
         show_input(debug_frame)
-
+        show_debug(tracker.big_proc_extra_tiny)
     start_time = time.time() * 1000
 
     if USE_VIDEO_FILE:
