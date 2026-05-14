@@ -8,7 +8,7 @@ import numpy as np
 import os
 import uuid
 # --- Configuration ---
-SERVER_HOST = '192.168.1.249'  # <-- Set to your server's static IP
+SERVER_HOST = '192.168.1.190'  # <-- Set to your server's static IP
 SERVER_PORT = 65432
 RECONNECT_DELAY = 3.0          # seconds between reconnect attempts
 

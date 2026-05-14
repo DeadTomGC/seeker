@@ -44,12 +44,12 @@ def rescale_image(img, scale):
     rescaled= cv2.resize(img, (int(w*scale), int(h*scale)), interpolation=cv2.INTER_NEAREST)
     return rescaled
 
-def to_cartesian(img, coord):
-    h, w = img.shape[:2]
+def to_cartesian(frame_size, coord):
+    w, h = frame_size
     return (int(coord[0] - w // 2), int(h // 2 - coord[1]))
 
-def to_image(img, coord):
-    h, w = img.shape[:2]
+def to_image(frame_size, coord):
+    w, h = frame_size
     return (coord[0] + w // 2, h // 2 - coord[1])
 
 
@@ -82,7 +82,7 @@ def draw_bounding_boxes(img, contours, scale, color=(0, 255, 0), thickness=2,sea
         x, y, w, h = cv2.boundingRect(c)
         x, y, w, h = int(x/float(scale)), int(y/float(scale)), int(w/float(scale)), int(h/float(scale))
         #if search_center and search_size:
-        image_search_center = to_image(img,search_center)
+        image_search_center = to_image((img.shape[:2][1],img.shape[:2][0]),search_center)
         x = x + (image_search_center[0]-search_size//2)
         y = y + (image_search_center[1]-search_size//2)
         cv2.rectangle(img, (x, y), (x+w, y+h), color, thickness)
@@ -93,14 +93,14 @@ def rescale_bounding_boxes_to_image(img, contours, scale, search_center,search_s
         x, y, w, h = cv2.boundingRect(c)
         x, y, w, h = int(x/float(scale)), int(y/float(scale)), int(w/float(scale)), int(h/float(scale))
         #if search_center and search_size:
-        image_search_center = to_image(img,search_center)
+        image_search_center = to_image((img.shape[:2][1],img.shape[:2][0]),search_center)
         x = x + (image_search_center[0]-search_size//2)
         y = y + (image_search_center[1]-search_size//2)
         bounding_boxes.append([x, y, w, h])
     return bounding_boxes
 
 def draw_search_area(img,search_center,search_size,color = (0,0,255),thickness = 2):
-    image_search_center = to_image(img,search_center)
+    image_search_center = to_image((img.shape[:2][1],img.shape[:2][0]),search_center)
     x = image_search_center[0]-search_size//2
     y = image_search_center[1]-search_size//2
     w = search_size
@@ -197,7 +197,7 @@ def contours_to_trackData(contours,time_ms):
     return [trackDataPoint(get_contour_center(c),max_bounding_box_length(c),time_ms) for c in contours]
 
 def scale_move_to_global_image(img,scale,center,size,trackData):
-    frame_center = to_image(img,center)
+    frame_center = to_image((img.shape[:2][1],img.shape[:2][0]),center)
     crop_top_left = (frame_center[0]-size//2,frame_center[1]-size//2)
     return [trackDataPoint((p.cx/scale+crop_top_left[0],p.cy/scale+crop_top_left[1]),p.area/scale,p.timestamp) for p in trackData]
 
@@ -236,6 +236,7 @@ class Seeker:
         self.not_found_count = 0
         self.slow_down = False
         self.velocity = (0, 0)
+        self.tiny_time = 0
 
         # --- per-frame outputs exposed for callers ---
         self.bounding_boxes = []        # rescaled bounding boxes in image coords
@@ -291,10 +292,10 @@ class Seeker:
 
         cropped_grey, new_location = crop_square(
             grey_full,
-            to_image(grey_full, self.search_location),
+            to_image(self.frame_size, self.search_location),
             self.search_size
         )
-        self.search_location = to_cartesian(grey_full, new_location)
+        self.search_location = to_cartesian(self.frame_size, new_location)
         self.real_search_location = self.search_location
         self.real_search_size = self.search_size
         self.resized_grey, self.rel_scale = resize_image(cropped_grey, self.smaller_size)
@@ -307,17 +308,15 @@ class Seeker:
         if len(self.contours) == 0:
             #failed to find the target, are we in trees?
             tiny_op_time = time.time()*1000000
-            self.extra_tiny = self.resized_grey #slow_resize_image(self.resized_grey,64)
-            self.extra_tiny = cv2.blur(self.extra_tiny,(5,5))
+            self.extra_tiny,_ = resize_image(self.resized_grey,64)
+            self.extra_tiny = cv2.blur(self.extra_tiny,(3,3))
             self.processed_extra_tiny = edge_canny(self.extra_tiny,low=100,high=200)
             
+
+            self.contours = find_filter_closed_contours(self.processed_extra_tiny)
+            self.rel_scale = self.rel_scale*4 #incase we resize it
             tiny_op_time_2 = time.time()*1000000
             self.tiny_time = tiny_op_time_2 - tiny_op_time
-            
-            self.big_proc_extra_tiny,_ = resize_image(self.processed_extra_tiny, self.smaller_size)
-
-            self.contours = find_filter_closed_contours(self.resized_grey)
-            self.rel_scale = self.rel_scale*1 #incase we resize it
             
         #draw_contours(processed, self.contours)
         #scaled_up_processed, rel_scale_l = resize_image(processed, 400)
@@ -351,7 +350,7 @@ class Seeker:
                     + self.velocity[1] * (time_ms - self.video_track_data[-2].timestamp)
                 )
                 image_search_loc = (image_search_loc_x, image_search_loc_y)
-                self.search_location = to_cartesian(grey_full, image_search_loc)
+                self.search_location = to_cartesian(self.frame_size, image_search_loc)
                 #self.search_location = (0, 0) #TODO: delete
                 areas = np.array([p.area for p in self.video_track_data])
                 self.search_size = min(
@@ -361,7 +360,7 @@ class Seeker:
                 #self.search_size = 400 #TODO: delete
         else:
             for data in frame_track_data:
-                if point_distance(to_cartesian(grey_full, (data.cx, data.cy)), (0, 0)) < 150:
+                if point_distance(to_cartesian(self.frame_size, (data.cx, data.cy)), (0, 0)) < 150:
                     self.video_track_data.append(data)
                     break
 
@@ -370,7 +369,7 @@ class Seeker:
         # Compute bounding boxes in image coordinates.
         # rescale_bounding_boxes_to_image uses img.shape, so pass grey_full.
         self.bounding_boxes = rescale_bounding_boxes_to_image(
-            grey_full, self.contours, self.rel_scale[0], self.real_search_location, self.real_search_size
+            self.frame_size, self.contours, self.rel_scale[0], self.real_search_location, self.real_search_size
         )
 
         # Small thumbnail for transmission
@@ -469,7 +468,7 @@ class Seeker:
         """
         return {
             'found': self.found,
-            'search_location': self.real_search_location,
+            'search_location': to_image(self.frame_size,self.real_search_location),
             'search_size': self.real_search_size,
             'velocity': self.velocity,
             'bounding_boxes': self.bounding_boxes,

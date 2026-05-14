@@ -108,7 +108,7 @@ while success:
         tiny_grey = tracker.get_tiny_grey_image()
         if client.connected:
             client.sendStatus(bounding_boxes, velocity,
-                              status['search_center'], [status['search_size'], status['search_size']],
+                              search_location, [status['search_size'], status['search_size']],
                               frame_size, tiny_grey)
 
     if count % 10 == 0:
@@ -116,12 +116,13 @@ while success:
               f"Location: {search_location} Velocity: {velocity[0]:.2f},{velocity[1]:.2f} "
               f"Frame Time: {(end_time - start_time):.2f}ms, Tiny Time {tracker.tiny_time:.2f}", end="")
     if end_time - start_time > 40:
-        print(f"\nHigh Frame Time: {end_time - start_time}ms")
+        pass
+        #print(f"\nHigh Frame Time: {end_time - start_time}ms")
         
     if USE_VIDEO_FILE:
         debug_frame = tracker.get_debug_bgr_image(image)
         show_input(debug_frame)
-        show_debug(tracker.big_proc_extra_tiny)
+        show_debug(cv2.resize(tracker.processed_extra_tiny, (256, 256), interpolation=cv2.INTER_NEAREST))
     start_time = time.time() * 1000
 
     if USE_VIDEO_FILE:
