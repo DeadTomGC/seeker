@@ -369,7 +369,7 @@ class Seeker:
         # Compute bounding boxes in image coordinates.
         # rescale_bounding_boxes_to_image uses img.shape, so pass grey_full.
         self.bounding_boxes = rescale_bounding_boxes_to_image(
-            self.frame_size, self.contours, self.rel_scale[0], self.real_search_location, self.real_search_size
+            grey_full, self.contours, self.rel_scale[0], self.real_search_location, self.real_search_size
         )
 
         # Small thumbnail for transmission
