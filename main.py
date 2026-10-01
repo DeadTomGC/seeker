@@ -19,7 +19,10 @@ def show_debug(img):
     cv2.imshow('debug', img)
     cv2.waitKey(1)
 
-g_time = 0
+def draw_test_time_and_count_info(img,frame_number=0,time_ratio = 0,bg_metric=0):
+    cv2.putText(img, f"Frame: {frame_number}", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
+    cv2.putText(img, f"Time Ratio: {time_ratio:.2f}", (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
+    cv2.putText(img, f"Total Areas: {bg_metric}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
 
 video_file = ''
 # Check for --video command line argument
@@ -88,6 +91,15 @@ if success:
 else:
     print("Error, Exiting")
 
+paused = True if USE_VIDEO_FILE else False
+
+#pre scroll to frame of interest, if the user has specified a start frame
+if USE_VIDEO_FILE:
+    startFrame = 2080
+    while count < startFrame:
+        success, image = vidcap.read()
+        count += 1
+
 while success:
     if USE_VIDEO_FILE:
         g_time = count * 0.033
@@ -121,8 +133,29 @@ while success:
         
     if USE_VIDEO_FILE:
         debug_frame = tracker.get_debug_bgr_image(image)
+        draw_test_time_and_count_info(debug_frame, count, tracker.time_ratio,bg_metric=tracker.bg_metric)
         show_input(debug_frame)
-        show_debug(cv2.resize(tracker.processed_extra_tiny, (256, 256), interpolation=cv2.INTER_NEAREST))
+        show_debug(cv2.resize(tracker.processed_grey, (256, 256), interpolation=cv2.INTER_NEAREST))
+        #if the space bar is pressed, pause the loop until the space bar is pressed again
+        #if, while the loop is paused, the user presses the n key, continue to the next frame and pause on that frame
+        key = cv2.waitKey(25)& 0xFF
+        if paused or key == ord(' '):
+
+            paused = True
+            print("\nPaused. Press space to continue, n for next frame.")
+            while True:
+                key2 = cv2.waitKey(25) & 0xFF
+                if key2 == ord(' '):
+                    paused = False
+                    print("Continuing...")
+                    break
+                elif key2 == ord('n'):
+                    print("Next frame...")
+                    break
+                if key2 == ord('r'):
+                    print("Resetting tracker...")
+                    tracker.reset_track()
+                    break
     start_time = time.time() * 1000
 
     if USE_VIDEO_FILE:

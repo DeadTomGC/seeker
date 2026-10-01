@@ -14,11 +14,10 @@ def show_processed(img):
 def crop_square(img, center, size):
     h, w = img.shape[:2]
     half = size // 2
-    
     x = max(half, min(center[0], w - half))
     y = max(half, min(center[1], h - half))
-    
     return img[y - half:y + half, x - half:x + half], (x, y)
+
 
 def to_greyscale(img):
     return cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
@@ -27,22 +26,43 @@ def yuv_to_greyscale(img):
     h, w = img.shape[:2]
     return img[:h, :w]
 
-def resize_image(img, size):
+def resize_image(img, size, interpolation=cv2.INTER_NEAREST):
     h, w = img.shape[:2]
-    resized = cv2.resize(img, (size, size), interpolation=cv2.INTER_NEAREST)
-    scale = size / w, size / h
-    return resized, scale
+    resized = cv2.resize(img, (size, size), interpolation=interpolation)
+    return resized, (size / w, size / h)
+
+def diff_resize_image(img):
+    h, w = img.shape[:2]
+    #resized = cv2.resize(img, (size, size), interpolation=interpolation)
+    resized2 = cv2.resize(img, (w//2, h//2), interpolation=cv2.INTER_AREA)
+    resized4 = cv2.resize(resized2, (w//4, h//4), interpolation=cv2.INTER_AREA)
+    resized8 = cv2.resize(resized4, (w//8, h//8), interpolation=cv2.INTER_AREA)
+    resized16 = cv2.resize(resized8, (w//16, h//16), interpolation=cv2.INTER_AREA)
+    resized32 = cv2.resize(resized16, (w//32, h//32), interpolation=cv2.INTER_AREA)
+    resized32_16 = cv2.resize(resized32, (w//16, h//16), interpolation=cv2.INTER_LINEAR)
+    resized16 = cv2.subtract(resized16,cv2.subtract(resized16, resized32_16))
+    resized16_8 = cv2.resize(resized16, (w//8, h//8), interpolation=cv2.INTER_LINEAR)
+    resized8_4 = cv2.resize(resized16_8, (w//4, h//4), interpolation=cv2.INTER_LINEAR)
+    resized4_2 = cv2.resize(resized8_4, (w//2, h//2), interpolation=cv2.INTER_LINEAR)
+    resized2_1 = cv2.resize(resized4_2, (w, h), interpolation=cv2.INTER_LINEAR)
+    return cv2.absdiff(cv2.resize(resized2, (w, h), interpolation=cv2.INTER_LINEAR), resized2_1), (w / w, h / h)
+
+def resize_blur(img):
+    h, w = img.shape[:2]
+    #resized2 = cv2.resize(img, (w//2, h//2), interpolation=cv2.INTER_AREA)
+    resized4 = cv2.resize(img, (w//4, h//4), interpolation=cv2.INTER_AREA)
+    #resized8 = cv2.resize(resized4, (w//8, h//8), interpolation=cv2.INTER_AREA)
+    #resized8_4 = cv2.resize(resized8, (w//4, h//4), interpolation=cv2.INTER_LINEAR)
+    resized4_1 = cv2.resize(resized4, (w, h), interpolation=cv2.INTER_LINEAR)
+    #resized2_1 = cv2.resize(resized4_2, (w, h), interpolation=cv2.INTER_LINEAR)
+    return resized4_1
 
 def slow_resize_image(img, size):
-    h, w = img.shape[:2]
-    resized = cv2.resize(img, (size, size), interpolation=cv2.INTER_LINEAR)
-    scale = size / w, size / h
-    return resized, scale
+    return resize_image(img, size, interpolation=cv2.INTER_LINEAR)
 
 def rescale_image(img, scale):
-    h, w = img.shape[:2]
-    rescaled= cv2.resize(img, (int(w*scale), int(h*scale)), interpolation=cv2.INTER_NEAREST)
-    return rescaled
+    return cv2.resize(img, (int(img.shape[1] * scale), int(img.shape[0] * scale)), interpolation=cv2.INTER_NEAREST)
+
 
 def to_cartesian(frame_size, coord):
     w, h = frame_size
@@ -60,7 +80,7 @@ def to_color(img):
     return cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
 
 
-def find_filter_closed_contours(edge_img,kernel_size = 7,min_solidity = 1):
+def find_filter_closed_contours(edge_img,kernel_size = 7,min_solidity = 0.8):
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size,kernel_size))
     closed = cv2.morphologyEx(edge_img, cv2.MORPH_CLOSE, kernel)
     contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -73,6 +93,21 @@ def find_filter_closed_contours(edge_img,kernel_size = 7,min_solidity = 1):
         x, y, cw, ch = cv2.boundingRect(c)
         #if hull_area > 0 and area / hull_area >= min_solidity:
         if perimeter>0 and area/perimeter >= min_solidity and cw/iw < 0.8 and ch/ih < 0.8:#*area/100:
+            good_contours.append(c)
+    return good_contours
+
+def simple_find_filter_closed_contours(edge_img,min_solidity = 1):
+
+    contours, _ = cv2.findContours(edge_img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    ih, iw = edge_img.shape[:2]
+    good_contours = []
+    for c in contours:
+        area = cv2.contourArea(c)
+        #hull_area = cv2.contourArea(cv2.convexHull(c))
+        perimeter = cv2.arcLength(c,False)
+        x, y, cw, ch = cv2.boundingRect(c)
+        #if hull_area > 0 and area / hull_area >= min_solidity:
+        if perimeter>25 and area/perimeter >= min_solidity and cw/iw < 0.8 and ch/ih < 0.8:#*area/100:
             good_contours.append(c)
     return good_contours
 
@@ -154,7 +189,7 @@ def track_contour(contours: list, past_data: list, max_data_length,missed_tracks
     # larger margin when little data
     margin_scale = max(1.0, 3.0 / n)
     margin_scale = margin_scale + (0.1*missed_tracks)
-    pos_margin = 70 * margin_scale
+    pos_margin = 50 * margin_scale
     area_margin = 2 * margin_scale  # fraction of expected area
 
     # find best matching contour
@@ -246,6 +281,7 @@ class Seeker:
         self.resized_grey = None        # the small greyscale crop (smaller_size x smaller_size)
         self.processed_grey = None
         self.tiny_grey = None           # 40x40 version for transmission
+        #self.time_ratio =  0
 
         # internal reference image shape (set on first process call)
         self._img_shape = None
@@ -299,25 +335,56 @@ class Seeker:
         self.real_search_location = self.search_location
         self.real_search_size = self.search_size
         self.resized_grey, self.rel_scale = resize_image(cropped_grey, self.smaller_size)
-        self.processed_grey = edge_canny(self.resized_grey)
 
-        #processed = to_color(processed_grey)
-
-        self.contours = find_filter_closed_contours(self.processed_grey)
         
-        if len(self.contours) == 0:
+        #small = cv2.resize(self.resized_grey, (64, 64), interpolation=cv2.INTER_AREA)
+        #bg_metric = cv2.Laplacian(self.resized_grey, cv2.CV_64F).var()
+        bg_metric = self.resized_grey.sum()/65536.0
+        self.bg_metric = bg_metric
+        
+        if False and bg_metric < 175:
             #failed to find the target, are we in trees?
             tiny_op_time = time.time()*1000000
-            self.extra_tiny,_ = resize_image(self.resized_grey,64)
-            self.extra_tiny = cv2.blur(self.extra_tiny,(3,3))
-            self.processed_extra_tiny = edge_canny(self.extra_tiny,low=100,high=200)
+            self.extra_tiny,_ = diff_resize_image(self.resized_grey)#,64,interpolation=cv2.INTER_AREA)
+            #self.extra_tiny = cv2.blur(self.extra_tiny,(3,3))
+            #self.processed_extra_tiny = edge_canny(self.extra_tiny)
+            self.extra_tiny = cv2.multiply(cv2.subtract(self.extra_tiny,(50)),(2))
+            _, self.processed_extra_tiny = cv2.threshold(self.extra_tiny, 150, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            #kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3))
+            #self.processed_extra_tiny  = cv2.morphologyEx(self.processed_extra_tiny , cv2.MORPH_CLOSE, kernel)
             
-
-            self.contours = find_filter_closed_contours(self.processed_extra_tiny)
-            self.rel_scale = self.rel_scale*4 #incase we resize it
+            self.contours = simple_find_filter_closed_contours(self.processed_extra_tiny,min_solidity=3)
+            self.processed_extra_tiny = self.extra_tiny
+            self.processed_extra_tiny = to_color(self.processed_extra_tiny)
+            draw_contours(self.processed_extra_tiny , self.contours,(255,255,0),thickness=1)
+            #self.rel_scale = (self.rel_scale[0]/4.0, self.rel_scale[1]/4.0) #incase we resize it
             tiny_op_time_2 = time.time()*1000000
             self.tiny_time = tiny_op_time_2 - tiny_op_time
+        if bg_metric < 175:
+            tiny_op_time = time.time()*1000000
+            self.blurred = cv2.blur(self.resized_grey,(5,5))
+            tiny_op_time_2 = time.time()*1000000
+
+            #tiny_op_time_3 = time.time()*1000000
+            #self.blurred = resize_blur(self.resized_grey)
+            #tiny_op_time_4 = time.time()*1000000
+            #self.time_ratio =  (tiny_op_time_2-tiny_op_time)# / (tiny_op_time_4-tiny_op_time_3) if (tiny_op_time_4-tiny_op_time_3) > 0 else 0
+            self.processed_grey = edge_canny(self.blurred,low=75,high=190)
             
+            
+            self.tiny_time = tiny_op_time_2 - tiny_op_time
+
+            self.contours = find_filter_closed_contours(self.processed_grey)
+            self.rel_scale = self.rel_scale*1 #incase we resize it
+            #self.processed_grey = self.blurred #TODO: Remove
+        else:
+            self.processed_grey = edge_canny(self.resized_grey)
+
+            #processed = to_color(processed_grey)
+
+            self.contours = find_filter_closed_contours(self.processed_grey)
+            self.processed_grey = self.processed_grey
+
         #draw_contours(processed, self.contours)
         #scaled_up_processed, rel_scale_l = resize_image(processed, 400)
 
@@ -332,12 +399,8 @@ class Seeker:
             )
             if not new_found:
                 self.not_found_count += 1
-                if self.not_found_count > 5:
-                    self.not_found_count = 0
-                    self.video_track_data = []
-                    self.search_location = (0, 0)
-                    self.search_size = 400
-                    self.velocity = (0, 0)
+                if self.not_found_count > 15:
+                    self.reset_track()
             else:
                 self.not_found_count = 0
             if len(self.video_track_data) > 1:
@@ -379,6 +442,15 @@ class Seeker:
         self.count += 1
 
         return new_found
+
+    def reset_track(self):
+        """Reset the tracker state."""
+        self.video_track_data = []
+        self.not_found_count = 0
+        self.search_location = (0, 0)
+        self.search_size = 400
+        self.velocity = (0, 0)
+        self.found = False
 
     # ------------------------------------------------------------------
     # Debug / monitoring image helpers
