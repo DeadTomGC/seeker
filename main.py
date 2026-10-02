@@ -32,6 +32,11 @@ if '--video' in sys.argv:
     if video_idx + 1 < len(sys.argv):
         video_file = sys.argv[video_idx + 1]
 
+if '--host' in sys.argv:
+    host_idx = sys.argv.index('--host')
+    if host_idx + 1 < len(sys.argv):
+        SERVER_HOST = sys.argv[host_idx + 1]
+
 
 if video_file == '' and USE_VIDEO_FILE:
     video_file = 'short_video.mp4'
