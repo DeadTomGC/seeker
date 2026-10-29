@@ -4,9 +4,10 @@ import time
 from bno055 import *
 from control import *
 from uart_wrapper import *
+import radio_rx
 
-status_code = 0
 
+crsf = radio_rx.create_csrf()
 uart = UART(1, baudrate=115200, tx=Pin(4), rx=Pin(5),timeout = 0)
 
 rx = Receiver(uart)
@@ -14,6 +15,7 @@ rx = Receiver(uart)
 # Pyboard hardware I2C
 i2c = machine.I2C(1)
 imu = BNO055(i2c,address=0x29)
+status_code = 0
 calibrated = False
 count = 0
 pitch_command = 0
@@ -22,7 +24,9 @@ cmd_rx_count = 0
 error_count = 0
 fail_safe = False
 while True:
-    time.sleep(0.02)
+    crsf.process_frames()
+    channels = crsf.channels
+    #time.sleep(0.02)
     try:
         gyro_data = imu.gyro()
         error_count = 0
@@ -57,8 +61,9 @@ while True:
             msg = res[1] #hello message?
     
     count += 1
-    if count %20 == 0:
+    if count %5 == 0:
         count = 0
+        print(channels)
         if not calibrated:
             calibrated = imu.calibrated()
             print('Calibration required: sys {} gyro {} accel {} mag {}'.format(*imu.cal_status()))
