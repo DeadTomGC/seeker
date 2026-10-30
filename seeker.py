@@ -303,6 +303,12 @@ class Seeker:
     # Public API
     # ------------------------------------------------------------------
 
+    @property
+    def tracking(self):
+        """True while a track exists (one or more video_track_data entries),
+        independent of whether the target matched in the most recent frame."""
+        return len(self.video_track_data) > 0
+
     def process_frame(self, image, time_ms):
         """
         Process a single frame and update tracking state.
@@ -393,7 +399,7 @@ class Seeker:
         )
 
         new_found = False
-        if len(self.video_track_data) > 0:
+        if self.tracking:
             self.video_track_data, self.velocity, new_found = track_contour(
                 frame_track_data, self.video_track_data, self.track_history_length, self.not_found_count,time_ms
             )
@@ -535,11 +541,12 @@ class Seeker:
 
         Returns
         -------
-        dict with keys: found, search_location, search_size, velocity,
+        dict with keys: found, tracking, search_location, search_size, velocity,
                         bounding_boxes, not_found_count, count
         """
         return {
             'found': self.found,
+            'tracking': self.tracking,
             'search_location': to_image(self.frame_size,self.real_search_location),
             'search_size': self.real_search_size,
             'velocity': self.velocity,

@@ -68,23 +68,42 @@ def control_servos(servo_pos:list[float]):
         duty = max(min(int(5000 + (servo_pos[i] * (3400) / 100)),8400),1600)
         servo_pwm.duty_u16(duty)
 
+# --- ESC / primary motor ------------------------------------------------
+# Standard 50 Hz servo-style throttle signal, 1000..2000 us.
+esc_pwm = PWM(Pin(15))
+esc_pwm.freq(50)
+ESC_IDLE_DUTY = 3277   # ~1000 us
+ESC_MAX_DUTY = 6553    # ~2000 us
+
+def control_throttle(throttle_pct: float, armed: bool):
+    """Drive the ESC.  throttle_pct 0..100, armed gates the output.
+    Unarmed output is a 1000 us idle pulse (kept for ESC keep-alive)."""
+    global esc_pwm
+    throttle_pct = max(0.0, min(100.0, throttle_pct))
+    if armed and throttle_pct > 0.0:
+        duty = int(ESC_IDLE_DUTY + (ESC_MAX_DUTY - ESC_IDLE_DUTY) * throttle_pct / 100.0)
+    else:
+        duty = ESC_IDLE_DUTY
+    esc_pwm.duty_u16(duty)
+
 p = 0.1
 i = 0.01
 d = 0.01
 integral = [0,0,0]
 old_gyro = [0,0,0]
 integral_max = 2000
-def update_pid(gyro,pitch,yaw)->list[float]:
+def update_pid(gyro,pitch,yaw,roll=0.0)->list[float]:
     global integral,old_gyro,integral_max,p,i,d
     pitch_target_dps = 1.0*pitch
     yaw_target_dps = 1.0*yaw
+    roll_target_dps = 1.0*roll
     # x is pitch
     # y is yaw
     # z is roll
     pitch_dps = gyro[0]
     yaw_dps = gyro[1]
     roll_dps = gyro[2]
-    dist = [pitch_target_dps - pitch_dps, yaw_target_dps - yaw_dps,0 - roll_dps]
+    dist = [pitch_target_dps - pitch_dps, yaw_target_dps - yaw_dps, roll_target_dps - roll_dps]
     deriv = [0,0,0]
     output = [0,0,0]
     for n in range(0,3):
@@ -103,3 +122,4 @@ if __name__ == "__main__":
     print(mix_controls(0, 100, 0))     # [0, 100, 0, -100]
     print(mix_controls(0, 0, 100))     # [100, 0, -100, 0]
     print(mix_controls(100, 100, 100)) # renormalized
+    print(control_throttle(50, True))

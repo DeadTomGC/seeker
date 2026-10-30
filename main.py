@@ -9,7 +9,10 @@ import sys
 import cv2
 from client import *
 from seeker import Seeker
+from pico_link import PicoLink, steer_to_location, CTRL_FLAG_SEEK_ACTIVE, TRACKING_NONE, TRACKING_LOCKED
 
+pico = None
+go_active = False
 
 def show_input(img):
     cv2.imshow('input', img)
@@ -18,6 +21,13 @@ def show_input(img):
 def show_debug(img):
     cv2.imshow('debug', img)
     cv2.waitKey(1)
+
+def on_go():
+    """GO notification: from the Pico (SEEK engaged on the RC switch) or a
+    server 'go' click.  Motor arming is decided by the Pico from the RC."""
+    global go_active
+    go_active = True
+    print("[Seeker] GO: pursuit engaged (motor arming is on the RC switch)")
 
 def draw_test_time_and_count_info(img,frame_number=0,time_ratio = 0,bg_metric=0):
     cv2.putText(img, f"Frame: {frame_number}", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
@@ -81,6 +91,12 @@ if not USE_VIDEO_FILE:
     client = StatusClient(SERVER_HOST, SERVER_PORT)
     client.set_go_callback(on_go)
 
+    try:
+        pico = PicoLink(silent=False)
+        print("[Seeker] Pico link running")
+    except Exception as e:
+        print(f"[Seeker] Pico link unavailable: {e}")
+
 image_format = 'BGR' if USE_VIDEO_FILE else 'YUV420'
 tracker = Seeker(frame_size, image_format=image_format)
 
@@ -119,6 +135,37 @@ while success:
     bounding_boxes = status['bounding_boxes']
     count = status['count']
 
+    # The Pico commands the RPi's state over the link; like the control
+    # frames, this state rides in every telemetry frame so missed messages
+    # self-heal.  Standby continually resets tracks so no stale track is
+    # revived when control returns to automatic; GO fires once per edge.
+    if pico is not None:
+        telem = pico.get_telemetry()
+        if telem is not None and telem['age_s'] < 1.0:
+            if telem['pi_standby']:
+                tracker.reset_track()
+                status = tracker.get_status()
+                search_location = status['search_location']
+                velocity = status['velocity']
+                bounding_boxes = status['bounding_boxes']
+            if telem['pi_go'] and not go_active:
+                on_go()
+            go_active = telem['pi_go']
+
+    if pico is not None:
+        if status['tracking']:
+            seek_active, roll_cmd, pitch_cmd, yaw_cmd = steer_to_location(
+                status['search_location'], frame_size)
+            flags = CTRL_FLAG_SEEK_ACTIVE
+        else:
+            seek_active, roll_cmd, pitch_cmd, yaw_cmd = False, 0.0, 0.0, 0.0
+            flags = 0
+        # Tracker state rides in every control frame: missed messages
+        # self-heal and the Pico eventually sees any status change.
+        pico.set_command(flags,
+                         TRACKING_LOCKED if status['tracking'] else TRACKING_NONE,
+                         roll_cmd, pitch_cmd, yaw_cmd)
+
     end_time = time.time() * 1000
 
     if not USE_VIDEO_FILE:
@@ -132,6 +179,13 @@ while success:
         print(f"\rConnection: {'N/A (video file)' if USE_VIDEO_FILE else client.connected} "
               f"Location: {search_location} Velocity: {velocity[0]:.2f},{velocity[1]:.2f} "
               f"Frame Time: {(end_time - start_time):.2f}ms, Tiny Time {tracker.tiny_time:.2f}", end="")
+        if pico is not None:
+            telem = pico.get_telemetry()
+            if telem is not None:
+                print(f"\n[Pico] status:0x{telem['status']:02X} "
+                      f"standby:{telem['pi_standby']} go:{telem['pi_go']} "
+                      f"armed:{telem['motor_armed']} euler:{telem['euler']} "
+                      f"battery:{telem['battery_v']:.1f}V age:{telem['age_s']:.1f}s")
     if end_time - start_time > 40:
         pass
         #print(f"\nHigh Frame Time: {end_time - start_time}ms")
