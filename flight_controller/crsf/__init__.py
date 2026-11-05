@@ -21,6 +21,20 @@ Example
         crsf.process_frames()
 """
 
-from .core import BAUD_RATE, CRSF, LinkStatistics, ticks_to_us
+from .core import (
+    BAUD_RATE,
+    CRSF,
+    LinkStatistics,
+    ticks_diff,
+    ticks_ms,
+    ticks_to_us,
+)
 
-__all__ = ["BAUD_RATE", "CRSF", "LinkStatistics", "ticks_to_us"]
+__all__ = [
+    "BAUD_RATE",
+    "CRSF",
+    "LinkStatistics",
+    "ticks_diff",
+    "ticks_ms",
+    "ticks_to_us",
+]

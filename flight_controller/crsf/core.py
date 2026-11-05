@@ -64,12 +64,20 @@ CRSF_SYNC_BYTES = (0xC8, 0xEE)
 CRSF_FRAMETYPE_RC_CHANNELS_PACKED = const(0x16)
 CRSF_FRAMETYPE_BATTERY_SENSOR = const(0x08)
 CRSF_FRAMETYPE_LINK_STATISTICS = const(0x14)
+CRSF_FRAMETYPE_ATTITUDE = const(0x1E)
+CRSF_FRAMETYPE_FLIGHT_MODE = const(0x1F)
 CRSF_FRAMETYPE_CUSTOM_PAYLOAD = const(0x7F)
 
 # Telemetry round-robin order
 CRSF_BATTERY_INDEX = const(0)
 CRSF_CUSTOM_PAYLOAD_INDEX = const(1)
-TELEMETRY_FRAME_TYPES = const(2)
+CRSF_ATTITUDE_INDEX = const(2)
+CRSF_FLIGHT_MODE_INDEX = const(3)
+TELEMETRY_FRAME_TYPES = const(4)
+
+# ATTITUDE frames carry int16 values in radians * 10000
+_DEG_TO_CRAD = 10000.0 / 57.295779513
+FLIGHT_MODE_MAX_LEN = const(16)
 
 # Threshold defaults
 DEFAULT_LINK_QUALITY_THRESHOLD = const(70)
@@ -145,6 +153,30 @@ class _TelemetryCustom:
         self.length = 0
 
 
+class _TelemetryAttitude:
+    __slots__ = ("pitch", "roll", "yaw")
+
+    def __init__(self) -> None:
+        self.pitch = 0
+        self.roll = 0
+        self.yaw = 0
+
+
+class _TelemetryFlightMode:
+    __slots__ = ("buffer", "length")
+
+    def __init__(self) -> None:
+        self.buffer = bytearray(FLIGHT_MODE_MAX_LEN)
+        self.length = 0
+
+
+def _deg_to_crad(degrees: float) -> int:
+    """Convert degrees to int16 centi-radians as required by ATTITUDE frames."""
+
+    value = int(degrees * _DEG_TO_CRAD)
+    return max(-32768, min(32767, value))
+
+
 class CRSF:
     """CRSF protocol handler.
 
@@ -193,6 +225,8 @@ class CRSF:
         self._telem_len = 0
         self._battery = _TelemetryBattery()
         self._custom = _TelemetryCustom()
+        self._attitude = _TelemetryAttitude()
+        self._flight_mode = _TelemetryFlightMode()
         self._frame_has_data = [False] * TELEMETRY_FRAME_TYPES
         self._telem_rotation = 0
 
@@ -272,6 +306,22 @@ class CRSF:
         mv[:length] = data[:length]
         self._custom.length = length
         self._frame_has_data[CRSF_CUSTOM_PAYLOAD_INDEX] = True
+
+    def telem_set_attitude_data(self, pitch: float, roll: float, yaw: float) -> None:
+        """Queue an ATTITUDE frame. Angles are given in degrees."""
+
+        self._attitude.pitch = _deg_to_crad(pitch)
+        self._attitude.roll = _deg_to_crad(roll)
+        self._attitude.yaw = _deg_to_crad(yaw)
+        self._frame_has_data[CRSF_ATTITUDE_INDEX] = True
+
+    def telem_set_flight_mode(self, text: str) -> None:
+        """Queue a FLIGHT_MODE frame (short status string, max 16 chars)."""
+
+        data = text[:FLIGHT_MODE_MAX_LEN].encode()
+        self._flight_mode.buffer[: len(data)] = data
+        self._flight_mode.length = len(data)
+        self._frame_has_data[CRSF_FLIGHT_MODE_INDEX] = True
 
     # ------------------------------------------------------------------
     # Incoming frame processing
@@ -433,6 +483,10 @@ class CRSF:
                 self._write_battery_sensor_payload()
             elif idx == CRSF_CUSTOM_PAYLOAD_INDEX:
                 self._write_custom_payload()
+            elif idx == CRSF_ATTITUDE_INDEX:
+                self._write_attitude_payload()
+            elif idx == CRSF_FLIGHT_MODE_INDEX:
+                self._write_flight_mode_payload()
             else:  # pragma: no cover - safeguard
                 continue
             self._end_frame()
@@ -462,6 +516,18 @@ class CRSF:
         for i in range(length):
             self._write_ui8(self._custom.buffer[i])
 
+    def _write_attitude_payload(self) -> None:
+        self._write_ui8(CRSF_FRAMETYPE_ATTITUDE)
+        self._write_i16be(self._attitude.pitch)
+        self._write_i16be(self._attitude.roll)
+        self._write_i16be(self._attitude.yaw)
+
+    def _write_flight_mode_payload(self) -> None:
+        self._write_ui8(CRSF_FRAMETYPE_FLIGHT_MODE)
+        for i in range(self._flight_mode.length):
+            self._write_ui8(self._flight_mode.buffer[i])
+        self._write_ui8(0)  # null terminator
+
     # ------------------------------------------------------------------
     # Buffer helpers
     # ------------------------------------------------------------------
@@ -477,6 +543,14 @@ class CRSF:
 
     def _write_ui24(self, value: int) -> None:
         self._write_ui8((value >> 16) & 0xFF)
+        self._write_ui8((value >> 8) & 0xFF)
+        self._write_ui8(value & 0xFF)
+
+    def _write_i16be(self, value: int) -> None:
+        """Signed 16-bit big-endian write (CRSF wire order)."""
+
+        if value < 0:
+            value += 0x10000
         self._write_ui8((value >> 8) & 0xFF)
         self._write_ui8(value & 0xFF)
 
