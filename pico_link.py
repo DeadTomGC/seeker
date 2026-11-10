@@ -125,25 +125,3 @@ class PicoLink:
                 if not self.silent:
                     print(f"[PicoLink] rx error: {e}")
                 time.sleep(0.1)
-
-
-def steer_to_location(search_location, frame_size, max_cmd=100.0,
-                      deadband_px=10.0, gain=0.15, silent=True):
-    """Proportional steering law: keep the tracked search location centred.
-
-    search_location is the tracker's image-space (x, y).  Returns
-    (seek_active, roll, pitch, yaw) rate commands in -100..100, with roll
-    always 0 (the RPi does not steer roll; the pilot does).
-
-    Signs are set for a conventional layout and may need flipping per airframe.
-    """
-    offset_x = search_location[0] - frame_size[0] / 2.0
-    offset_y = search_location[1] - frame_size[1] / 2.0
-
-    if abs(offset_x) < deadband_px and abs(offset_y) < deadband_px:
-        return False, 0.0, 0.0, 0.0
-
-    # Target right of centre -> yaw right (positive); below centre -> pitch.
-    yaw = max(-max_cmd, min(max_cmd, offset_x * gain))
-    pitch = max(-max_cmd, min(max_cmd, offset_y * gain))
-    return True, 0.0, pitch, yaw

@@ -5,14 +5,153 @@ except:
     print("no picam, hope you're good with that... ")
     USE_VIDEO_FILE = True
 import time
+import math
 import sys
 import cv2
 from client import *
 from seeker import Seeker
-from pico_link import PicoLink, steer_to_location, CTRL_FLAG_SEEK_ACTIVE, TRACKING_NONE, TRACKING_LOCKED
+from pico_link import PicoLink, CTRL_FLAG_SEEK_ACTIVE, TRACKING_NONE, TRACKING_LOCKED
 
 pico = None
 go_active = False
+
+# ---------------------------------------------------------------------------
+# Pursuit control: null the track's true radial (angular) velocity
+# ---------------------------------------------------------------------------
+# Tunables: diagonal field of view of the camera/lens and the PID gains.
+CAMERA_DIAGONAL_FOV_DEG = 65.0
+
+# (Kp, Ki, Kd) mapping deg/s of true track velocity to a -100..100 rate cmd.
+YAW_PID_GAINS = (3.0, 0.5, 0.2)
+PITCH_PID_GAINS = (3.0, 0.5, 0.2)
+RADIAL_DEADBAND_DPS = 0.5          # deg/s: below this the axis counts as nulled
+
+# (Kp, Ki, Kd) mapping the centring error in deg to a -100..100 rate cmd.
+YAW_CENTER_GAINS = (5.0, 0.2, 1.0)
+PITCH_CENTER_GAINS = (5.0, 0.2, 1.0)
+CENTER_DEADBAND_PX = 10.0          # px from centre: inside this, no steering
+STEERING_FF_GAIN = 0.8             # feed-forward from true track velocity
+MAX_STEER_CMD = 100.0
+MAX_STEER_DT = 0.1                 # s: control-loop dt clamp
+
+# Sign fixes for the IMU mounting; flip to -1.0 per airframe if the axis
+# responds the wrong way (mirrors the sign caveat in steer_to_location).
+GYRO_YAW_SIGN = 1.0                # gz: positive = nose right
+GYRO_PITCH_SIGN = 1.0              # gx: positive = nose up
+
+# The tracker's polyfit velocity is px/ms (fit over millisecond timestamps).
+TRACKER_VELOCITY_PX_S_SCALE = 1000.0
+
+
+def deg_per_pixel(frame_size, diagonal_fov_deg=CAMERA_DIAGONAL_FOV_DEG):
+    """Angular resolution of the image given the diagonal FOV."""
+    return diagonal_fov_deg / math.hypot(frame_size[0], frame_size[1])
+
+
+def pixels_to_deg_per_s(velocity_px_s, frame_size,
+                        diagonal_fov_deg=CAMERA_DIAGONAL_FOV_DEG):
+    """Convert a track velocity in px/s into deg/s about the X (pitch) and
+    Z (yaw) axes, using the diagonal FOV and image resolution."""
+    deg_per_px = deg_per_pixel(frame_size, diagonal_fov_deg)
+    return velocity_px_s[0] * deg_per_px, velocity_px_s[1] * deg_per_px
+
+
+class PID:
+    """Tunable PID: input an error, output a steering command clamped to
+    -100..100.  The integral is clamped and the deadband zeroes the error
+    around the setpoint.  The derivative is skipped on the first update
+    after a reset to avoid a startup spike."""
+
+    def __init__(self, gains, max_cmd=MAX_STEER_CMD, deadband=0.0):
+        self.kp, self.ki, self.kd = gains
+        self.max_cmd = max_cmd
+        self.deadband = deadband
+        self.reset()
+
+    def reset(self):
+        self.integral = 0.0
+        self.prev_error = 0.0
+        self._first = True
+
+    def update(self, error, dt):
+        if dt <= 0.0:
+            return 0.0
+        if abs(error) < self.deadband:
+            error = 0.0
+        self.integral += error * dt
+        i_limit = self.max_cmd / max(self.ki, 1e-6)
+        self.integral = max(-i_limit, min(i_limit, self.integral))
+        deriv = 0.0 if self._first else (error - self.prev_error) / dt
+        self._first = False
+        self.prev_error = error
+        cmd = self.kp * error + self.ki * self.integral + self.kd * deriv
+        return max(-self.max_cmd, min(self.max_cmd, cmd))
+
+
+# Velocity-nulling PIDs (pursuit): input true track velocity in deg/s.
+yaw_rate_pid = PID(YAW_PID_GAINS, deadband=RADIAL_DEADBAND_DPS)
+pitch_rate_pid = PID(PITCH_PID_GAINS, deadband=RADIAL_DEADBAND_DPS)
+# Centering PIDs (seek): input angular offset from centre in deg.
+yaw_center_pid = PID(YAW_CENTER_GAINS)
+pitch_center_pid = PID(PITCH_CENTER_GAINS)
+last_ctrl_time = time.time()
+
+
+def true_track_velocity_dps(velocity_px_ms, frame_size, gyro_dps):
+    """True angular velocity of the track in deg/s: the apparent image
+    velocity plus our own rotation rate (they cancel when the target is
+    stationary in the world and we are turning)."""
+    vx_dps, vy_dps = pixels_to_deg_per_s(
+        (velocity_px_ms[0] * TRACKER_VELOCITY_PX_S_SCALE,
+         velocity_px_ms[1] * TRACKER_VELOCITY_PX_S_SCALE), frame_size)
+    # Z faces forward, so yaw rate is gz and pitch rate is gx.
+    return (vx_dps + GYRO_YAW_SIGN * gyro_dps[2],
+            vy_dps + GYRO_PITCH_SIGN * gyro_dps[0])
+
+
+def null_radial_velocity(velocity_px_ms, frame_size, gyro_dps, dt,
+                         yaw_ctrl=yaw_rate_pid, pitch_ctrl=pitch_rate_pid):
+    """Steer to null the track's true radial velocity, compensating for our
+    own rotation rate.
+
+    Returns (pitch_cmd, yaw_cmd) in -100..100.  Sign conventions match
+    steer_to_location: track moving left (true vx < 0) -> steer left."""
+    true_vx, true_vy = true_track_velocity_dps(velocity_px_ms, frame_size, gyro_dps)
+    yaw_cmd = yaw_ctrl.update(true_vx, dt)
+    pitch_cmd = pitch_ctrl.update(true_vy, dt)
+    return pitch_cmd, yaw_cmd
+
+
+def steer_to_location(search_location, frame_size, velocity_px_ms, gyro_dps,
+                      dt, yaw_ctrl=yaw_center_pid, pitch_ctrl=pitch_center_pid):
+    """Steer to hold the tracked location centred in the camera's view.
+
+    Same tunable-PID scheme as null_radial_velocity, but the error is the
+    angular offset of the search location from the image centre.  A
+    feed-forward term from the track's true (rotation-compensated) velocity
+    pre-positions the nose for a moving track.  Returns
+    (seek_active, roll, pitch, yaw) rate commands in -100..100, with roll
+    always 0 (the RPi does not steer roll; the pilot does).
+
+    Signs are set for a conventional layout and may need flipping per
+    airframe (see GYRO_*_SIGN): target right of centre -> yaw right
+    (positive); below centre -> pitch positive."""
+    offset_x = search_location[0] - frame_size[0] / 2.0
+    offset_y = search_location[1] - frame_size[1] / 2.0
+
+    if abs(offset_x) < CENTER_DEADBAND_PX and abs(offset_y) < CENTER_DEADBAND_PX:
+        yaw_ctrl.reset()
+        pitch_ctrl.reset()
+        return False, 0.0, 0.0, 0.0
+
+    deg_per_px = deg_per_pixel(frame_size)
+    true_vx, true_vy = true_track_velocity_dps(velocity_px_ms, frame_size, gyro_dps)
+
+    yaw_cmd = yaw_ctrl.update(offset_x * deg_per_px, dt) + STEERING_FF_GAIN * true_vx
+    pitch_cmd = pitch_ctrl.update(offset_y * deg_per_px, dt) + STEERING_FF_GAIN * true_vy
+    yaw_cmd = max(-MAX_STEER_CMD, min(MAX_STEER_CMD, yaw_cmd))
+    pitch_cmd = max(-MAX_STEER_CMD, min(MAX_STEER_CMD, pitch_cmd))
+    return True, 0.0, pitch_cmd, yaw_cmd
 
 def show_input(img):
     cv2.imshow('input', img)
@@ -153,11 +292,29 @@ while success:
             go_active = telem['pi_go']
 
     if pico is not None:
+        now_ctrl = time.time()
+        dt = min(max(now_ctrl - last_ctrl_time, 1e-3), MAX_STEER_DT)
+        last_ctrl_time = now_ctrl
         if status['tracking']:
-            seek_active, roll_cmd, pitch_cmd, yaw_cmd = steer_to_location(
-                status['search_location'], frame_size)
+            gyro = telem['gyro'] if (telem is not None and telem['age_s'] < 1.0) \
+                else (0.0, 0.0, 0.0)
+            if go_active:
+                pitch_cmd, yaw_cmd = null_radial_velocity(
+                    velocity, frame_size, gyro, dt)
+                seek_active, roll_cmd = True, 0.0
+                yaw_center_pid.reset()
+                pitch_center_pid.reset()
+            else:
+                yaw_rate_pid.reset()
+                pitch_rate_pid.reset()
+                seek_active, roll_cmd, pitch_cmd, yaw_cmd = steer_to_location(
+                    status['search_location'], frame_size, velocity, gyro, dt)
             flags = CTRL_FLAG_SEEK_ACTIVE
         else:
+            yaw_rate_pid.reset()
+            pitch_rate_pid.reset()
+            yaw_center_pid.reset()
+            pitch_center_pid.reset()
             seek_active, roll_cmd, pitch_cmd, yaw_cmd = False, 0.0, 0.0, 0.0
             flags = 0
         # Tracker state rides in every control frame: missed messages
